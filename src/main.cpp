@@ -48,6 +48,7 @@ void setup() {
 }
 
 void loop() {
+    network_poll();
     artnet_poll();
     webserver_poll();
     button_poll();

@@ -13,7 +13,7 @@ void config_defaults(Config &c) {
     c.ethSubnet   = 0;
     c.ethGw       = 0;
     c.ethDns      = 0;
-    c.protocol    = 0;
+    c.protocol    = 2;  // Both ArtNet + sACN
     c.artUniverse = 0;
     c.sacnUniverse = 1;
     c.dmxStartCh  = 1;
