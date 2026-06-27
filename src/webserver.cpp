@@ -126,7 +126,16 @@ static String buildPage() {
     p += F("'></fieldset>"
            "<input type='submit' value='Save'></form>");
 
-    // Status poller + JS
+    // Activity log section
+    p += F("<div style='margin-top:20px'>"
+           "<div style='color:var(--g);text-transform:uppercase;letter-spacing:2px;"
+           "font-size:15px;border-bottom:1px solid var(--g);padding-bottom:8px;"
+           "margin-bottom:10px'>Activity Log</div>"
+           "<div id='logEntries' style='font-size:17px;color:#555'>"
+           "No data received yet.</div>"
+           "</div>");
+
+    // JS: status + log pollers
     p += F("<script>"
            "function toggleStatic(cb){"
            "document.getElementById('staticFields').className=cb.checked?'hidden':'';"
@@ -136,13 +145,32 @@ static String buildPage() {
            "document.getElementById('artnetFields').className=(v==='1')?'hidden':'';"
            "document.getElementById('sacnFields').className=(v==='0')?'hidden':'';"
            "}"
-           "(function poll(){"
+           "(function pollStatus(){"
            "fetch('/status').then(r=>r.json()).then(d=>{"
            "document.getElementById('status').innerHTML="
            "'ETH: '+(d.eth?'<b>'+d.ip+'</b>':'disconnected')"
            "+'&nbsp;&nbsp;AP: '+d.apIp;"
            "}).catch(()=>{});"
-           "setTimeout(poll,3000);"
+           "setTimeout(pollStatus,3000);"
+           "})();"
+           "(function pollLog(){"
+           "fetch('/log').then(r=>r.json()).then(entries=>{"
+           "var el=document.getElementById('logEntries');"
+           "if(!entries.length){"
+           "el.innerHTML='<span style=\"color:#444\">No data received yet.</span>';"
+           "return;}"
+           "el.innerHTML=entries.map(e=>"
+           "'<div style=\"display:flex;justify-content:space-between;padding:7px 0;"
+           "border-bottom:1px solid #1c1c1c\">'"
+           "+'<span style=\"color:var(--g);min-width:60px\">'+(e.p==='ArtNet'?'ART':'E131')+'</span>'"
+           "+'<span style=\"color:#aaa;min-width:50px\">u:'+e.u+'</span>'"
+           "+'<span style=\"color:#ccc;flex:1\">'+e.ip+'</span>'"
+           "+'<span style=\"color:#666;min-width:55px;text-align:right\">'+e.ch+'ch</span>'"
+           "+'<span style=\"color:#444;min-width:70px;text-align:right\">'+e.ago+'</span>'"
+           "+'</div>'"
+           ").join('');"
+           "}).catch(()=>{});"
+           "setTimeout(pollLog,2000);"
            "})();"
            "</script></body></html>");
 
@@ -167,6 +195,12 @@ static uint32_t parseIp(AsyncWebServerRequest *req, const char *name, uint32_t c
 
 static void handleRoot(AsyncWebServerRequest *req) {
     req->send(200, "text/html", buildPage());
+}
+
+static void handleLog(AsyncWebServerRequest *req) {
+    String json;
+    artnet_log_json(json);
+    req->send(200, "application/json", json);
 }
 
 static void handleStatus(AsyncWebServerRequest *req) {
@@ -238,6 +272,7 @@ static void handleSave(AsyncWebServerRequest *req) {
 void webserver_init() {
     server.on("/",       HTTP_GET,  handleRoot);
     server.on("/status", HTTP_GET,  handleStatus);
+    server.on("/log",    HTTP_GET,  handleLog);
     server.on("/save",   HTTP_POST, handleSave);
     server.onNotFound([](AsyncWebServerRequest *req){
         req->send(404, "text/plain", "Not found");
