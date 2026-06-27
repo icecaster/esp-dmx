@@ -1,57 +1,54 @@
 #include <Arduino.h>
-#include <ETH.h>
-#include <WiFi.h>
+#include <Preferences.h>
 #include "pins.h"
+#include "config.h"
+#include "network.h"
+#include "dmx_output.h"
+#include "artnet_handler.h"
+#include "webserver.h"
 
-// LAN8720A ethernet config (mirrors build flags in platformio.ini)
-#define ETH_ADDR        1
-#define ETH_POWER       -1
-#define ETH_MDC         23
-#define ETH_MDIO        18
-#define ETH_CLK         ETH_CLOCK_GPIO17_OUT
+static uint32_t btnHeldSince = 0;
+static bool     btnWasLow    = false;
 
-static bool eth_connected = false;
-
-void onEthEvent(WiFiEvent_t event) {
-    switch (event) {
-        case ARDUINO_EVENT_ETH_START:
-            Serial.println("ETH: started");
-            ETH.setHostname("dmx-controller");
-            break;
-        case ARDUINO_EVENT_ETH_CONNECTED:
-            Serial.println("ETH: link up");
-            break;
-        case ARDUINO_EVENT_ETH_GOT_IP:
-            Serial.print("ETH: IP ");
-            Serial.println(ETH.localIP());
-            eth_connected = true;
-            break;
-        case ARDUINO_EVENT_ETH_DISCONNECTED:
-            Serial.println("ETH: link down");
-            eth_connected = false;
-            break;
-        case ARDUINO_EVENT_ETH_STOP:
-            Serial.println("ETH: stopped");
-            eth_connected = false;
-            break;
-        default:
-            break;
+static void button_poll() {
+    bool low = digitalRead(PIN_BUTTON) == LOW;
+    if (low && !btnWasLow) {
+        btnHeldSince = millis();
+        btnWasLow    = true;
+    } else if (!low) {
+        btnWasLow = false;
+    }
+    // Long-press >3s: factory reset
+    if (btnWasLow && (millis() - btnHeldSince) > 3000) {
+        Serial.println("Factory reset!");
+        Preferences prefs;
+        prefs.begin(CFG_NS, false);
+        prefs.clear();
+        prefs.end();
+        delay(200);
+        ESP.restart();
     }
 }
 
 void setup() {
     Serial.begin(115200);
+    Serial.println("\nDMX Controller starting...");
 
     pinMode(PIN_BUTTON, INPUT_PULLUP);
     pinMode(PIN_RELAY, OUTPUT);
     digitalWrite(PIN_RELAY, LOW);
 
-    WiFi.onEvent(onEthEvent);
-    ETH.begin(ETH_ADDR, ETH_POWER, ETH_MDC, ETH_MDIO, ETH_PHY_LAN8720, ETH_CLK);
+    config_load(config_get());
+    network_init();
+    dmx_output_init();
+    artnet_init();
+    webserver_init();
 
-    Serial.println("Setup complete");
+    Serial.println("Ready.");
 }
 
 void loop() {
-    // application logic here
+    artnet_poll();
+    webserver_poll();
+    button_poll();
 }
