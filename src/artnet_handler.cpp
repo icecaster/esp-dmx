@@ -52,6 +52,7 @@ void artnet_log_json(String &out) {
     xSemaphoreGive(g_logMutex);
 
     uint32_t now = millis();
+    out.reserve(count * 80 + 4);
     out = "[";
     for (uint8_t i = 0; i < count; i++) {
         // walk backwards from most recent

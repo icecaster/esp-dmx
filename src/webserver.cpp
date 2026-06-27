@@ -1,6 +1,7 @@
 #include "webserver.h"
 #include "config.h"
 #include "artnet_handler.h"
+#include "dmx_output.h"
 #include "network.h"
 #include <ESPAsyncWebServer.h>
 #include <IPAddress.h>
@@ -126,6 +127,44 @@ static String buildPage() {
     p += F("'></fieldset>"
            "<input type='submit' value='Save'></form>");
 
+    // Manual DMX control
+    p += F("<div style='margin-top:20px'>"
+           "<div style='color:var(--g);text-transform:uppercase;letter-spacing:2px;"
+           "font-size:15px;border-bottom:1px solid var(--g);padding-bottom:8px;"
+           "margin-bottom:14px'>Manual Control</div>"
+           "<div style='display:flex;gap:12px;align-items:flex-end;flex-wrap:wrap'>"
+           "<div>"
+           "<label style='font-size:18px;color:#aaa;display:block;margin-bottom:5px'>Channel</label>"
+           "<input type='number' id='mCh' min='1' max='512' value='1'"
+           " style='width:100px;padding:14px 10px;background:var(--s);color:var(--g);"
+           "border:1px solid #333;border-radius:3px;font-size:20px;font-family:inherit'>"
+           "</div>"
+           "<div style='flex:1;min-width:180px'>"
+           "<label style='font-size:18px;color:#aaa;display:block;margin-bottom:5px'>"
+           "Value&nbsp;<span id='mValDisp' style='color:var(--g)'>0</span></label>"
+           "<input type='range' id='mVal' min='0' max='255' value='0'"
+           " style='width:100%;accent-color:var(--g)'"
+           " oninput='document.getElementById(\"mValDisp\").textContent=this.value'>"
+           "</div>"
+           "<button onclick='setDmxCh()'"
+           " style='background:transparent;color:var(--g);border:2px solid var(--g);"
+           "padding:14px 22px;border-radius:4px;cursor:pointer;font-family:inherit;"
+           "font-size:18px;min-height:52px;letter-spacing:1px'>SET</button>"
+           "<button onclick='clearDmx()'"
+           " style='background:transparent;color:#666;border:2px solid #333;"
+           "padding:14px 22px;border-radius:4px;cursor:pointer;font-family:inherit;"
+           "font-size:18px;min-height:52px;letter-spacing:1px'>CLEAR ALL</button>"
+           "</div></div>");
+
+    // DMX channel levels visualiser (channels 1-32)
+    p += F("<div style='margin-top:20px'>"
+           "<div style='color:var(--g);text-transform:uppercase;letter-spacing:2px;"
+           "font-size:15px;border-bottom:1px solid var(--g);padding-bottom:8px;"
+           "margin-bottom:10px'>DMX Output (ch 1-32)</div>"
+           "<div id='dmxBars' style='display:grid;grid-template-columns:repeat(16,1fr);"
+           "gap:3px'></div>"
+           "</div>");
+
     // Activity log section
     p += F("<div style='margin-top:20px'>"
            "<div style='color:var(--g);text-transform:uppercase;letter-spacing:2px;"
@@ -137,6 +176,19 @@ static String buildPage() {
 
     // JS: status + log pollers
     p += F("<script>"
+           "var selCh=0;"
+           "function selectDmxCh(ch,val){"
+           "selCh=ch;"
+           "document.getElementById('mCh').value=ch;"
+           "document.getElementById('mVal').value=val;"
+           "document.getElementById('mValDisp').textContent=val;"
+           "}"
+           "function setDmxCh(){"
+           "var ch=document.getElementById('mCh').value;"
+           "var val=document.getElementById('mVal').value;"
+           "fetch('/dmxset?ch='+ch+'&val='+val);"
+           "}"
+           "function clearDmx(){fetch('/dmxclear');}"
            "function toggleStatic(cb){"
            "document.getElementById('staticFields').className=cb.checked?'hidden':'';"
            "}"
@@ -152,6 +204,29 @@ static String buildPage() {
            "+'&nbsp;&nbsp;AP: '+d.apIp;"
            "}).catch(()=>{});"
            "setTimeout(pollStatus,3000);"
+           "})();"
+           "(function pollDmx(){"
+           "fetch('/dmxbuf').then(r=>r.json()).then(d=>{"
+           "var el=document.getElementById('dmxBars');"
+           "var h='';"
+           "d.forEach(function(v,i){"
+           "var ch=i+1;"
+           "var sel=selCh===ch;"
+           "var bdr=sel?'border:2px solid var(--g)':'border:1px solid var(--bd)';"
+           "var lc=sel?'color:var(--g)':'color:#555';"
+           "h+='<div style=\"text-align:center;cursor:pointer\" onclick=\"selectDmxCh('+ch+','+v+')\">'"
+           "+'<div style=\"height:60px;background:var(--b);'+bdr+';position:relative\">'"
+           "+'<div style=\"position:absolute;bottom:0;width:100%;background:var(--g);opacity:0.9;height:'+(v/255*100)+'%\"></div></div>'"
+           "+'<div style=\"font-size:10px;'+lc+'\">'+ch+'</div>'"
+           "+'<div style=\"font-size:11px;color:#aaa\">'+v+'</div></div>';"
+           "});"
+           "el.innerHTML=h;"
+           "if(selCh>0&&selCh<=d.length){"
+           "var cv=d[selCh-1];"
+           "document.getElementById('mVal').value=cv;"
+           "document.getElementById('mValDisp').textContent=cv;}"
+           "}).catch(()=>{});"
+           "setTimeout(pollDmx,1000);"
            "})();"
            "(function pollLog(){"
            "fetch('/log').then(r=>r.json()).then(entries=>{"
@@ -201,6 +276,27 @@ static void handleLog(AsyncWebServerRequest *req) {
     String json;
     artnet_log_json(json);
     req->send(200, "application/json", json);
+}
+
+static void handleDmxBuf(AsyncWebServerRequest *req) {
+    String json;
+    dmx_output_dump(json);
+    req->send(200, "application/json", json);
+}
+
+static void handleDmxSet(AsyncWebServerRequest *req) {
+    if (!req->hasParam("ch") || !req->hasParam("val")) {
+        req->send(400); return;
+    }
+    uint16_t ch  = (uint16_t)constrain(req->getParam("ch")->value().toInt(),  1, 512);
+    uint8_t  val = (uint8_t) constrain(req->getParam("val")->value().toInt(), 0, 255);
+    dmx_output_set(ch, val);
+    req->send(200, "text/plain", "OK");
+}
+
+static void handleDmxClear(AsyncWebServerRequest *req) {
+    dmx_output_clear();
+    req->send(200, "text/plain", "OK");
 }
 
 static void handleStatus(AsyncWebServerRequest *req) {
@@ -273,6 +369,9 @@ void webserver_init() {
     server.on("/",       HTTP_GET,  handleRoot);
     server.on("/status", HTTP_GET,  handleStatus);
     server.on("/log",    HTTP_GET,  handleLog);
+    server.on("/dmxbuf",  HTTP_GET, handleDmxBuf);
+    server.on("/dmxset",  HTTP_GET, handleDmxSet);
+    server.on("/dmxclear",HTTP_GET, handleDmxClear);
     server.on("/save",   HTTP_POST, handleSave);
     server.onNotFound([](AsyncWebServerRequest *req){
         req->send(404, "text/plain", "Not found");
