@@ -1,9 +1,11 @@
 #include "artnet_handler.h"
 #include "dmx_output.h"
+#include "network.h"
 #include <WiFiUdp.h>
 #include <IPAddress.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
+#include <esp_mac.h>
 #include <string.h>
 
 #define ARTNET_PORT 6454
@@ -13,6 +15,7 @@
 static WiFiUDP udpArtNet;
 static WiFiUDP udpSacn;
 static uint8_t rxBuf[640];
+static bool    g_announced = false;
 
 // ---- Activity log ----------------------------------------------------------
 
@@ -55,7 +58,6 @@ void artnet_log_json(String &out) {
     out.reserve(count * 80 + 4);
     out = "[";
     for (uint8_t i = 0; i < count; i++) {
-        // walk backwards from most recent
         uint8_t idx = (head + LOG_SIZE - 1 - i) % LOG_SIZE;
         LogEntry &e = copy[idx];
         if (i > 0) out += ",";
@@ -74,13 +76,78 @@ void artnet_log_json(String &out) {
     out += "]";
 }
 
+// ---- ArtPollReply ----------------------------------------------------------
+
+static void send_artpollreply(IPAddress dest) {
+    uint8_t pkt[239];
+    memset(pkt, 0, sizeof(pkt));
+
+    memcpy(pkt, "Art-Net\0", 8);
+    pkt[8] = 0x00;   // OpCode lo: ArtPollReply = 0x2100
+    pkt[9] = 0x21;
+
+    IPAddress ip = network_eth_connected() ? network_eth_ip() : IPAddress(192, 168, 4, 1);
+    pkt[10] = ip[0]; pkt[11] = ip[1]; pkt[12] = ip[2]; pkt[13] = ip[3];
+
+    pkt[14] = 0x36;  // Port 6454 lo
+    pkt[15] = 0x19;  // Port 6454 hi
+
+    pkt[16] = 0x00;  // VersInfoH
+    pkt[17] = 0x01;  // VersInfoL
+
+    const Config &c = config_get();
+    uint16_t u = c.artUniverse;
+    pkt[18] = (u >> 8) & 0x7F;  // NetSwitch
+    pkt[19] = (u >> 4) & 0x0F;  // SubSwitch
+
+    pkt[20] = 0xFF; pkt[21] = 0xFF;  // Oem: not registered
+
+    // Status1: indicator unknown, no RDM, firmware booted from flash
+    pkt[23] = 0x00;
+
+    strncpy((char*)pkt + 26, c.hostname, 17);  // ShortName (18 bytes)
+    snprintf((char*)pkt + 44, 64, "ArtNet/sACN DMX Controller %s", c.hostname);  // LongName
+    snprintf((char*)pkt + 108, 64, "#0001 [0000] OK");  // NodeReport
+
+    pkt[172] = 0x00;  // NumPortsHi
+    pkt[173] = 0x01;  // NumPortsLo: 1 port
+    pkt[174] = 0x80;  // PortTypes[0]: output, DMX512
+    pkt[182] = 0x80;  // GoodOutputA[0]: data being transmitted
+    pkt[190] = u & 0x0F;  // SwOut[0]: universe low nibble
+
+    pkt[194] = 100;   // AcnPriority
+    pkt[200] = 0x00;  // Style: StNode
+
+    uint8_t mac[6];
+    esp_read_mac(mac, ESP_MAC_ETH);
+    memcpy(pkt + 201, mac, 6);
+
+    pkt[207] = ip[0]; pkt[208] = ip[1];
+    pkt[209] = ip[2]; pkt[210] = ip[3];
+    pkt[211] = 1;  // BindIndex
+
+    // Status2: supports 15-bit port address (bit3), DHCP capable (bit2)
+    pkt[212] = 0x08 | (c.ethDhcp ? 0x06 : 0x00);
+
+    udpArtNet.beginPacket(dest, ARTNET_PORT);
+    udpArtNet.write(pkt, sizeof(pkt));
+    udpArtNet.endPacket();
+}
+
 // ---- ArtNet parsing --------------------------------------------------------
 
 static void parse_artnet(int len, uint32_t srcIp) {
-    if (len < 18) return;
+    if (len < 10) return;
     if (memcmp(rxBuf, "Art-Net\0", 8) != 0) return;
     uint16_t opcode = rxBuf[8] | ((uint16_t)rxBuf[9] << 8);
-    if (opcode != 0x5000) return;
+
+    if (opcode == 0x2000) {  // ArtPoll
+        send_artpollreply(IPAddress(srcIp));
+        return;
+    }
+
+    if (opcode != 0x5000) return;  // Not ArtDmx
+    if (len < 18) return;
     uint16_t universe = rxBuf[14] | ((uint16_t)(rxBuf[15] & 0x7F) << 8);
     if (universe != config_get().artUniverse) return;
     uint16_t dmxLen = ((uint16_t)rxBuf[16] << 8) | rxBuf[17];
@@ -128,6 +195,13 @@ void artnet_init() {
 void artnet_poll() {
     const Config &c = config_get();
 
+    // Broadcast an unsolicited ArtPollReply once ETH has an IP so controllers
+    // that scan on startup discover us without needing to send an ArtPoll first.
+    if (!g_announced && network_eth_connected()) {
+        g_announced = true;
+        send_artpollreply(IPAddress(255, 255, 255, 255));
+    }
+
     if (c.protocol == 0 || c.protocol == 2) {
         int len = udpArtNet.parsePacket();
         if (len > 0) {
@@ -150,5 +224,6 @@ void artnet_poll() {
 void artnet_rebind(const Config &c) {
     udpArtNet.stop();
     udpSacn.stop();
+    g_announced = false;
     artnet_init();
 }
